@@ -1,0 +1,94 @@
+#!/bin/bash
+
+## rsync-based full system backup and restore
+
+set -e
+
+# Check if being executed in a live usb.
+if [ "$(whoami)" != 'ubuntu' ] ; then
+    echo 'Must run in a live usb. Abort.' && exit 1
+fi
+
+# Config
+echo 'Config begin'
+read -p 'Backup or restore? (backup/restore) ' ARG
+if [ "$ARG" = 'backup' ] || [ "$ARG" = 'restore' ] ; then
+    read -p 'Source partition? /dev/nvme0n1p7/ ' SRC
+    read -p 'Destination partition? /dev/sda4/ ' DST
+    if [ "$ARG" = 'restore' ] ; then
+        echo 'For restoring, need more information to fix grub afterwards.'
+        read -p 'Boot partition? e.g. /dev/nvme0n1p1/ ' BOOT
+        read -p 'MBR drive? e.g. /dev/nvme0n1/ ' MASTER
+    fi
+else
+    echo 'Invalid argument - type "backup" or "restore"' && exit 1
+fi
+OPTIONS='-aHAXvP --delete --exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/cdrom/* --exclude=/lost+found --exclude=/swapfile --exclude=/home/*/.gvfs'
+echo 'Config done'
+
+# Mount
+echo 'Mount begin'
+SRC_MOUNT='/mnt/src/' && DST_MOUNT='/mnt/dst/'
+sudo mkdir -p $SRC_MOUNT $DST_MOUNT
+if ! findmnt -M $SRC_MOUNT ; then
+    sudo mount $SRC $SRC_MOUNT
+fi
+if ! findmnt -M $DST_MOUNT ; then
+    sudo mount $DST $DST_MOUNT 
+fi
+echo 'Mount done'
+
+# Dry run
+echo 'Dry run begin'
+sudo rsync $OPTIONS --dry-run $SRC_MOUNT $DST_MOUNT
+echo 'Dry run done'
+
+# Confirm
+echo "Final check: SRC=$SRC, SRC_MOUNT=$SRC_MOUNT, DST=$DST, DST_MOUNT=$DST_MOUNT"
+read -p 'Enter "y" to proceed: ' CONFIRM
+if [ "$CONFIRM" != 'y' ] ; then
+    echo 'Abort' && exit 1
+fi
+
+# Clone
+echo 'Clone begin'
+sudo rsync $OPTIONS $SRC_MOUNT $DST_MOUNT
+echo 'Clone done'
+
+# Fix target partition UUID
+SRC_UUID=$(sudo blkid -o value -s UUID $SRC)
+DST_UUID=$(sudo blkid -o value -s UUID $DST)
+sudo sed -i "s/$DST_UUID/$SRC_UUID/" ${DST_MOUNT}etc/fstab
+
+# grub fix
+if [ $ARG = 'restore' ] ; then
+    echo 'grub fix begin'
+    sudo umount $SRC
+    sudo mount $BOOT ${DST_MOUNT}boot/efi
+    sudo mount --bind /dev ${DST_MOUNT}dev
+    sudo mount --bind /proc ${DST_MOUNT}proc
+    sudo mount --bind /run ${DST_MOUNT}run
+    sudo mount --bind /sys ${DST_MOUNT}sys
+    sudo chroot $DST_MOUNT grub-install $MASTER
+    sudo chroot $DST_MOUNT update-grub
+    echo 'grub fix done'
+fi
+
+# Cleanup
+echo 'Cleanup begin'
+if [ $ARG = 'restore' ] ; then
+    sudo umount $BOOT
+    sudo umount ${DST_MOUNT}dev
+    sudo umount ${DST_MOUNT}proc
+    sudo umount ${DST_MOUNT}run
+    sudo umount ${DST_MOUNT}sys
+fi
+
+if findmnt -M $SRC_MOUNT ; then
+    sudo umount $SRC
+fi
+if findmnt -M $DST_MOUNT ; then
+    sudo umount $DST 
+fi
+sudo rmdir $SRC_MOUNT $DST_MOUNT
+echo 'Cleanup done'
